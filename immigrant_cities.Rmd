@@ -1,0 +1,168 @@
+---
+title: "Identifying the largest foreign-born populations in a city using ACS data."
+output: html_notebook
+---
+
+```{r}
+library(tidycensus)
+library(tidyverse)
+library(magrittr)
+library(tigris)
+library(tidygeocoder)
+library(sf)
+
+#update
+proj = "C:/Users/Orion Wilcox/Documents/Personal/Blog/Projects/District Diversity/"
+```
+
+Set Key Variables
+
+```{r}
+
+#option1: named city
+city = "New York City"
+radius = 20000 #20km since unit for CRS is meters
+
+#census_api_key("321abcbbf0b1492c1b1bfa77049bfae2d9bd5f5f", install = T)
+
+#option2: coordinates
+
+city = data.frame(city = "New York", long = "-74.01185376994371", lat = "40.706019441059205")
+```
+
+Load Data
+
+```{r}
+#acs variables
+
+acs_vars = load_variables(2022, "acs5", cache = T)
+
+acs_population = "B01003_001"
+
+origin_vars = acs_vars %>%
+  filter(grepl("B05006_", name))
+origin_vars = origin_vars$name
+
+#establish search parameters for census tracts
+city_pt = geocode(as.data.frame(city), city = city) %>% st_as_sf(coords = c("long", "lat"), crs = "EPSG:4269")
+city_pt =  st_as_sf(city, coords = c("long", "lat"), crs = "EPSG:4269")
+city_buffer = st_buffer(city_pt, dist = radius)
+
+
+#get county geometries with population estimates
+pop = get_acs(geography = "county",
+              variables = acs_population,
+              year = 2022,
+              cache_table = T,
+              geometry = T,
+              cb = T) 
+
+
+#identify counties that intersect with city
+counties = pop %>%
+  filter(st_intersects(pop, geometry, city_buffer)) %>%
+  separate(NAME, into = c("county", "state"), sep = ",") %>%  
+  mutate_at(vars(county, state), ~ str_trim(.))
+
+#load country of origin data for census tracts 
+
+tracts = get_acs(geography = "tract",
+              variables = origin_vars,
+              state = counties$state,
+              county = counties$county,
+              year = 2022,
+              cache_table = T,
+              geometry = T) 
+
+#filter to only keep tracts within 20km of city center
+tracts = st_filter(tracts, city_buffer)
+
+```
+
+Data Preparation
+
+```{r}
+#join with concept names
+tracts = left_join(tracts, acs_vars, by = c("variable" = "name"))
+
+#create table with geoid, state, county, tract, variable, region, sub-region, country
+
+tracts = tracts %>%
+  separate(NAME, into = c("tract", "county", "state"), sep = ",") %>%
+  separate(label, into = c("est", "tot", "region", "sub-region", "micro-region", "country"), sep = "!!") %>%
+  mutate(country = ifelse(is.na(country), `micro-region`, country)) %>%
+  select(-`micro-region`)
+
+#remove regions and subregions
+
+tracts = tracts %>%
+  filter(!is.na(country)) %>%
+  select(GEOID, tract, county, state, variable, estimate, moe, region, `sub-region`, country) %>%
+  janitor::clean_names()
+
+#clean up country data and remove regional groupings
+
+tracts$region = gsub(":", "", tracts$region)
+tracts$sub_region = gsub(":", "", tracts$sub_region)
+tracts$country = gsub(":", "", tracts$country)
+
+tracts %<>%
+  filter(!(country %in% c("Central America", "South America", "Caribbean", "China")))
+
+#The tables include entries for China as well as China, excluding Hong Kong and Taiwan. Since we do not want to double count these entries we remove China above so we are left with 'China, excluding Hong Kong and Taiwan', 'Hong Kong', and 'Taiwan'
+
+tracts %<>% filter(country != "United Kingdom (inc. Crown Dependencies)")
+
+#Same as for China
+
+tracts %<>%
+  filter(estimate > 0)
+
+```
+What are the largest immigrant communities?
+```{r}
+
+#top countries by share of foreign born population in DMV
+
+foreign_born_totals = tracts %>%
+  st_drop_geometry() %>%
+  group_by(country) %>%
+  summarize(foreign_born = sum(estimate)) %>%
+  arrange(-foreign_born)
+
+top_5 = head(foreign_born_totals, 5)
+top_5 = top_5$country
+
+```
+
+```{r}
+#settings for creating dot density
+tracts %<>% st_make_valid()
+sf_use_s2(F)
+
+#create dot density
+top5_pts = tracts %>%
+  filter(country %in% top_5) %>%
+  as_dot_density(value = "estimate",
+                 values_per_dot = 50,
+                 group = "country",
+                 #prevents plotting points over water (but slows down processing)
+                 erase_water = T)
+
+
+#set country of origin as factor
+top5_pts$country = factor(top5_pts$country, levels = top_5)
+
+
+#map
+ggplot() +
+ # geom_sf(data = counties) +
+  geom_sf(data = top5_pts, aes(color = country), size = .1) +
+  scale_color_manual(values = c("#5D69B1", "#ED645A", "#52BCA3" , "#99C945", "#E58606")) +
+  theme()
+
+#ggsave("C:/Users/Orion Wilcox/Documents/Personal/Blog/Projects/District Diversity/visuals/district_diversity_50.png")
+
+st_write(top5_pts, paste0(proj, "data/processed/houston/houston_top5_20km.gpkg"))
+
+```
