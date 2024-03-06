@@ -1,0 +1,102 @@
+---
+title: "Immigrant Cities Maps"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+library(basemaps)
+library(ggmap)
+library(tidygeocoder)
+library(magrittr)
+
+proj = "C:/Users/Orion Wilcox/Documents/Personal/Blog/Projects/District Diversity/"
+```
+
+data prep
+
+```{r}
+#load immigrant community data for los angeles
+map = st_read(paste0(proj, "data/processed/houston_top5_20km.gpkg")) %>%
+  st_transform(crs = "EPSG:26916")
+
+#load 20km circle
+city = "Houston"
+city = data.frame(city)
+radius = 20000 #20km since unit for CRS is meters
+#we use NAD 83 UTM for buffering because it is projected
+city_pt = geocode(city, city = city) %>% st_as_sf(coords = c("long", "lat"), crs = 4326)
+city_pt %<>% st_transform(crs = "EPSG:26916")
+city_buffer = st_buffer(city_pt, dist = radius, nQuadSegs = 360)
+
+
+#basemap data (ensure everything matches NAD 83 UTM Zone 16)
+
+water = st_read(paste0(proj, "data/original/houston/texas-latest-free.shp/gis_osm_water_a_free_1.shp")) %>%
+  st_transform(crs = st_crs(city_buffer))
+
+streets = st_read(paste0(proj, "data/original/houston/texas-latest-free.shp/gis_osm_roads_free_1.shp")) %>%
+  st_transform(crs = st_crs(city_buffer))
+
+land = st_read(paste0(proj, "data/original/houston/texas-latest-free.shp/gis_osm_landuse_a_free_1.shp")) %>%
+  st_transform(crs = st_crs(city_buffer))
+
+#clip features to circle
+
+map_clip = st_intersection(map, city_buffer)
+water_clip = st_intersection(water, city_buffer)
+streets_clip = st_intersection(streets, city_buffer)
+land_clip = st_intersection(land, city_buffer)
+
+
+```
+
+analysis
+
+```{r}
+foreign_born_totals = map %>%
+  st_drop_geometry() %>%
+  group_by(country) %>%
+  summarize(foreign_born = sum(estimate)) %>%
+  arrange(-foreign_born)
+
+top_5 = head(foreign_born_totals, 5)
+top_5 = top_5$country
+```
+
+export for mapping in QGIS
+
+```{r}
+st_write(map_clip, paste0(proj, "data/processed/houston/houston_map.gpkg"), layer = "points")
+st_write(water_clip, paste0(proj, "data/processed/houston/houston_map.gpkg"), layer = "water")
+st_write(streets_clip, paste0(proj, "data/processed/houston/houston_map.gpkg"), layer = "streets")
+st_write(land_clip, paste0(proj, "data/processed/houston/houston_map.gpkg"), layer = "land")
+st_write(city_buffer, paste0(proj, "data/processed/houston/houston_map.gpkg"), layer = "circle")
+
+```
+
+theme
+
+```{r}
+
+#la
+
+colors = c("#5D69B1", "#ED645A", "#52BCA3" , "#99C945", "#E58606")
+
+map_clip$country = factor(map_clip$country, levels = top_5)
+
+
+```
+
+
+maps
+
+```{r}
+ggplot() +
+  #geom_sf(data = city_buffer, color = "grey") +
+  geom_sf(data = map_clip, aes(color = country), size = .1) +
+  scale_color_manual(values = colors) +
+  theme_void()
+```
+
